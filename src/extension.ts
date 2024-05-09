@@ -19,11 +19,12 @@ import {
 } from './testTree';
 import { BrowserTestRunner, PlatformTestRunner, VSCodeTestRunner } from './vscodeTestRunner';
 
-const TEST_FILE_PATTERN = 'src/vs/**/*.{test,integrationTest}.ts';
+const TEST_FILE_PATTERN = 'src/**/*.{test,integrationTest,spec}.ts';
+type TestRunner = "Karma" | "Jest" | undefined;
 
 const getWorkspaceFolderForTestFile = (uri: vscode.Uri) =>
-  (uri.path.endsWith('.test.ts') || uri.path.endsWith('.integrationTest.ts')) &&
-  uri.path.includes('/src/vs/')
+  (uri.path.endsWith('.test.ts') || uri.path.endsWith('.integrationTest.ts') || uri.path.endsWith('.spec.ts')) &&
+  uri.path.includes('/src/')
     ? vscode.workspace.getWorkspaceFolder(uri)
     : undefined;
 
@@ -32,6 +33,43 @@ const browserArgs: [name: string, arg: string][] = [
   ['Firefox', 'firefox'],
   ['Webkit', 'webkit'],
 ];
+
+const baseFileNames = [
+  "package.json",
+  "jest.config",
+  "karma.config",
+  "angular.json"
+]
+
+async function getRunnerName(d: vscode.TextDocument): Promise<TestRunner> {
+  let fileName: string | undefined = undefined;
+  for (const file of baseFileNames) {
+    if (d.fileName.includes(file)) {
+      fileName = d.fileName;
+    }
+  }
+
+  if (fileName === undefined) {
+    return undefined;
+  }
+
+  switch (fileName) {
+    case 'package.json':
+      return readPackageJson(d);
+    case 'angular.json':
+      return readAngularJson(d);
+    default:
+      try {
+        return readFile(d);
+      } catch (e) {
+        return undefined;
+      }
+  }
+}
+
+function readPackageJson(f: vscode.TextDocument): TestRunner {
+  
+}
 
 type FileChangeEvent = { uri: vscode.Uri; removed: boolean };
 
@@ -144,6 +182,28 @@ export async function activate(context: vscode.ExtensionContext) {
     };
   };
 
+  function updateNodeForDocument(e: vscode.TextDocument) {
+    const node = getOrCreateFile(ctrl, e.uri);
+    const data = node && itemData.get(node);
+    if (data instanceof TestFile) {
+      data.updateFromContents(ctrl, e.getText(), node!);
+    }
+  }
+
+  let runnerName: TestRunner = undefined;
+
+  for (const document of vscode.workspace.textDocuments) {
+    if (runnerName === undefined) {
+      const runner = await getRunnerName(document);
+      if (!!runner && runner.length) {
+        runnerName = runner;
+      }
+    }
+    updateNodeForDocument(document);
+  }
+
+
+  // TODO: Add in Jest and Karma Profiles Dynamically
   ctrl.createRunProfile(
     'Run in Electron',
     vscode.TestRunProfileKind.Run,
@@ -197,18 +257,6 @@ export async function activate(context: vscode.ExtensionContext) {
       undefined,
       true
     );
-  }
-
-  function updateNodeForDocument(e: vscode.TextDocument) {
-    const node = getOrCreateFile(ctrl, e.uri);
-    const data = node && itemData.get(node);
-    if (data instanceof TestFile) {
-      data.updateFromContents(ctrl, e.getText(), node!);
-    }
-  }
-
-  for (const document of vscode.workspace.textDocuments) {
-    updateNodeForDocument(document);
   }
 
   context.subscriptions.push(
