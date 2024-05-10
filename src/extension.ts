@@ -8,6 +8,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { coverageContext } from './coverageProvider';
 import { FailingDeepStrictEqualAssertFixer } from './failingDeepStrictEqualAssertFixer';
+import { readFile } from "./fileReader";
 import { registerSnapshotUpdate } from './snapshot';
 import { scanTestOutput } from './testOutputScanner';
 import {
@@ -49,26 +50,74 @@ async function getRunnerName(d: vscode.TextDocument): Promise<TestRunner> {
     }
   }
 
+  if (fileName?.includes("karma") || fileName?.includes("jest")) {
+    return fileName.includes("karma") ? "Karma" : "Jest";
+  }
+
   if (fileName === undefined) {
     return undefined;
   }
 
-  switch (fileName) {
+  const shortName = fileName.split('\\').pop();
+  switch (fileName.split("\\").pop()) {
     case 'package.json':
-      return readPackageJson(d);
+      return await readPackageJson(d);
     case 'angular.json':
-      return readAngularJson(d);
-    default:
-      try {
-        return readFile(d);
-      } catch (e) {
-        return undefined;
-      }
+      return await readAngularJson(d);
   }
+  return undefined;
 }
 
-function readPackageJson(f: vscode.TextDocument): TestRunner {
-  
+async function readAngularJson(f: vscode.TextDocument): Promise<TestRunner> {
+  const file = await readFile(f.uri);
+  if (file === undefined) {
+    return undefined;
+  }
+
+  const jsonValue = JSON.parse(file);
+  const projects = jsonValue.projects;
+
+  let testRunner: TestRunner = undefined;
+
+  Object.keys(projects).forEach((key) => {
+    if (testRunner === undefined) {
+      const architectObject = projects[key].architect;
+      if (architectObject === undefined) {
+        return;
+      }
+      const testConfig = architectObject.test;
+      if (testConfig === undefined) {
+        return;
+      }
+
+      const builder: string = testConfig.builder;
+      testRunner = builder.includes("karma") ? "Karma" : builder.includes("jest") ? "Jest" : undefined;
+    }
+  });
+
+  return testRunner;
+}
+
+async function readPackageJson(f: vscode.TextDocument): Promise<TestRunner> {
+  const file = await readFile(f.uri);
+  if (file === undefined) {
+    return undefined;
+  }
+  const jsonValue = JSON.parse(file)
+  const scriptsDefs = jsonValue.scripts;
+  if (scriptsDefs === undefined) {
+    return undefined;
+  }
+
+  let testRunner: TestRunner = undefined;
+  Object.keys(scriptsDefs).forEach((key) => {
+    if (testRunner == undefined) {
+      if (key.includes("test")) {
+        testRunner = scriptsDefs[key].includes("karma") ? "Karma" : scriptsDefs[key].includes("jest") ? "Jest" : undefined;
+      }
+    }
+  });
+  return testRunner;
 }
 
 type FileChangeEvent = { uri: vscode.Uri; removed: boolean };
@@ -204,60 +253,92 @@ export async function activate(context: vscode.ExtensionContext) {
 
 
   // TODO: Add in Jest and Karma Profiles Dynamically
-  ctrl.createRunProfile(
-    'Run in Electron',
-    vscode.TestRunProfileKind.Run,
-    createRunHandler(PlatformTestRunner, vscode.TestRunProfileKind.Run),
-    true,
-    undefined,
-    true
-  );
+  let coverage: vscode.TestRunProfile = undefined!;
+  switch (runnerName) {
+    case "Karma":
+      ctrl.createRunProfile(
+        'Run with Karma',
+        vscode.TestRunProfileKind.Run,
+        createRunHandler(BrowserTestRunner, vscode.TestRunProfileKind.Run),
+        true,
+        undefined,
+        true
+      );
 
-  ctrl.createRunProfile(
-    'Debug in Electron',
-    vscode.TestRunProfileKind.Debug,
-    createRunHandler(PlatformTestRunner, vscode.TestRunProfileKind.Debug),
-    true,
-    undefined,
-    true
-  );
+      ctrl.createRunProfile(
+        'Debug with Karma',
+        vscode.TestRunProfileKind.Debug,
+        createRunHandler(BrowserTestRunner, vscode.TestRunProfileKind.Debug),
+        true,
+        undefined,
+        true
+      );
 
-  const coverage = ctrl.createRunProfile(
-    'Coverage in Electron',
-    vscode.TestRunProfileKind.Coverage,
-    createRunHandler(PlatformTestRunner, vscode.TestRunProfileKind.Coverage),
-    true,
-    undefined,
-    true
-  );
+      coverage = ctrl.createRunProfile(
+        "Coverage with Karma",
+        vscode.TestRunProfileKind.Coverage,
+        createRunHandler(BrowserTestRunner, vscode.TestRunProfileKind.Coverage),
+        true,
+        undefined,
+        true
+      )
+      break;
+    case "Jest":
+      ctrl.createRunProfile(
+        "Run with Jest",
+        vscode.TestRunProfileKind.Run,
+        createRunHandler(PlatformTestRunner, vscode.TestRunProfileKind.Run),
+        true,
+        undefined,
+        true
+      );
+      ctrl.createRunProfile(
+        'Debug with Jest',
+        vscode.TestRunProfileKind.Debug,
+        createRunHandler(PlatformTestRunner, vscode.TestRunProfileKind.Debug),
+        true,
+        undefined,
+        true
+      );
 
-  coverage.loadDetailedCoverage = coverageContext.loadDetailedCoverage;
-
-  for (const [name, arg] of browserArgs) {
-    const cfg = ctrl.createRunProfile(
-      `Run in ${name}`,
-      vscode.TestRunProfileKind.Run,
-      createRunHandler(BrowserTestRunner, vscode.TestRunProfileKind.Run, [' --browser', arg]),
-      undefined,
-      undefined,
-      true
-    );
-
-    cfg.configureHandler = () => vscode.window.showInformationMessage(`Configuring ${name}`);
-
-    ctrl.createRunProfile(
-      `Debug in ${name}`,
-      vscode.TestRunProfileKind.Debug,
-      createRunHandler(BrowserTestRunner, vscode.TestRunProfileKind.Debug, [
-        '--browser',
-        arg,
-        '--debug-browser',
-      ]),
-      undefined,
-      undefined,
-      true
-    );
+      coverage = ctrl.createRunProfile(
+        "Coverage with Jest",
+        vscode.TestRunProfileKind.Coverage,
+        createRunHandler(PlatformTestRunner, vscode.TestRunProfileKind.Coverage),
+        true,
+        undefined,
+        true
+      )
   }
+
+  if (coverage)
+    coverage.loadDetailedCoverage = coverageContext.loadDetailedCoverage;
+  if (runnerName !== "Jest")
+    for (const [name, arg] of browserArgs) {
+      const cfg = ctrl.createRunProfile(
+        `Run in ${name}`,
+        vscode.TestRunProfileKind.Run,
+        createRunHandler(BrowserTestRunner, vscode.TestRunProfileKind.Run, [' --browser', arg]),
+        undefined,
+        undefined,
+        true
+      );
+
+      cfg.configureHandler = () => vscode.window.showInformationMessage(`Configuring ${name}`);
+
+      ctrl.createRunProfile(
+        `Debug in ${name}`,
+        vscode.TestRunProfileKind.Debug,
+        createRunHandler(BrowserTestRunner, vscode.TestRunProfileKind.Debug, [
+          '--browser',
+          arg,
+          '--debug-browser',
+        ]),
+        undefined,
+        undefined,
+        true
+      );
+    }
 
   context.subscriptions.push(
     ctrl,
