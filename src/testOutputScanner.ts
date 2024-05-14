@@ -53,8 +53,6 @@ export interface ITestCompleteEvent extends ITestStartEvent {
   actual?: string;
   err?: string;
   stack?: string;
-  expectedJSON?: any;
-  actualJSON?: any;
   snapshotPath?: string;
 }
 
