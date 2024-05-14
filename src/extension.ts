@@ -2,9 +2,6 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import { randomBytes } from 'crypto';
-import { tmpdir } from 'os';
-import * as path from 'path';
 import * as vscode from 'vscode';
 import { coverageContext } from './coverageProvider';
 import { FailingDeepStrictEqualAssertFixer } from './failingDeepStrictEqualAssertFixer';
@@ -18,10 +15,10 @@ import {
   guessWorkspaceFolder,
   itemData,
 } from './testTree';
-import { BrowserTestRunner, PlatformTestRunner, VSCodeTestRunner } from './vscodeTestRunner';
+import { AngularTestRunner, VSCodeTestRunner } from './vscodeTestRunner';
 
 const TEST_FILE_PATTERN = 'src/**/*.{test,integrationTest,spec}.ts';
-type TestRunner = "Karma" | "Jest" | undefined;
+type TestRunner = "Karma" | "Jest" | "Angular" | undefined;
 
 const getWorkspaceFolderForTestFile = (uri: vscode.Uri) =>
   (uri.path.endsWith('.test.ts') || uri.path.endsWith('.integrationTest.ts') || uri.path.endsWith('.spec.ts')) &&
@@ -29,16 +26,14 @@ const getWorkspaceFolderForTestFile = (uri: vscode.Uri) =>
     ? vscode.workspace.getWorkspaceFolder(uri)
     : undefined;
 
-const browserArgs: [name: string, arg: string][] = [
-  ['Chrome', 'chromium'],
-  ['Firefox', 'firefox'],
-  ['Webkit', 'webkit'],
-];
+// const browserArgs: [name: string, arg: string][] = [
+//   ['Chrome', 'chromium'],
+//   ['Firefox', 'firefox'],
+//   ['Webkit', 'webkit'],
+// ];
 
 const baseFileNames = [
   "package.json",
-  "jest.config",
-  "karma.config",
   "angular.json"
 ]
 
@@ -50,15 +45,14 @@ async function getRunnerName(d: vscode.TextDocument): Promise<TestRunner> {
     }
   }
 
-  if (fileName?.includes("karma") || fileName?.includes("jest")) {
-    return fileName.includes("karma") ? "Karma" : "Jest";
+  if (fileName?.includes("karma") || fileName?.includes("jest") || fileName?.includes("angular")) {
+    return fileName.includes("karma") ? "Karma" : fileName.includes("jest") ? "Jest" : "Angular";
   }
 
   if (fileName === undefined) {
     return undefined;
   }
 
-  const shortName = fileName.split('\\').pop();
   switch (fileName.split("\\").pop()) {
     case 'package.json':
       return await readPackageJson(d);
@@ -113,7 +107,7 @@ async function readPackageJson(f: vscode.TextDocument): Promise<TestRunner> {
   Object.keys(scriptsDefs).forEach((key) => {
     if (testRunner == undefined) {
       if (key.includes("test")) {
-        testRunner = scriptsDefs[key].includes("karma") ? "Karma" : scriptsDefs[key].includes("jest") ? "Jest" : undefined;
+        testRunner = scriptsDefs[key].includes("karma") ? "Karma" : scriptsDefs[key].includes("jest") ? "Jest" : scriptsDefs[key].split(" ")[0] === "ng" ? "Angular" : undefined;
       }
     }
   });
@@ -141,7 +135,7 @@ export async function activate(context: vscode.ExtensionContext) {
   };
 
   const createRunHandler = (
-    runnerCtor: { new (folder: vscode.WorkspaceFolder): VSCodeTestRunner },
+    runnerCtor: { new (folder: vscode.WorkspaceFolder, kind: vscode.TestRunProfileKind, continuous?: boolean,): VSCodeTestRunner },
     kind: vscode.TestRunProfileKind,
     args: string[] = []
   ) => {
@@ -154,7 +148,7 @@ export async function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      const runner = new runnerCtor(folder);
+      const runner = new runnerCtor(folder, kind, req.continuous);
       const map = await getPendingTestMap(ctrl, req.include ?? gatherTestItems(ctrl.items));
       const task = ctrl.createTestRun(req);
       for (const test of map.values()) {
@@ -162,20 +156,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
 
       let coverageDir: string | undefined;
-      let currentArgs = args;
-      if (kind === vscode.TestRunProfileKind.Coverage) {
-        coverageDir = path.join(tmpdir(), `vscode-test-coverage-${randomBytes(8).toString('hex')}`);
-        currentArgs = [
-          ...currentArgs,
-          '--coverage',
-          '--coveragePath',
-          coverageDir,
-          '--coverageFormats',
-          'json',
-          '--coverageFormats',
-          'html',
-        ];
-      }
+      const currentArgs = args;
 
       return await scanTestOutput(
         map,
@@ -231,14 +212,6 @@ export async function activate(context: vscode.ExtensionContext) {
     };
   };
 
-  function updateNodeForDocument(e: vscode.TextDocument) {
-    const node = getOrCreateFile(ctrl, e.uri);
-    const data = node && itemData.get(node);
-    if (data instanceof TestFile) {
-      data.updateFromContents(ctrl, e.getText(), node!);
-    }
-  }
-
   let runnerName: TestRunner = undefined;
 
   for (const document of vscode.workspace.textDocuments) {
@@ -251,94 +224,90 @@ export async function activate(context: vscode.ExtensionContext) {
     updateNodeForDocument(document);
   }
 
-
-  // TODO: Add in Jest and Karma Profiles Dynamically
-  let coverage: vscode.TestRunProfile = undefined!;
-  switch (runnerName) {
-    case "Karma":
-      ctrl.createRunProfile(
-        'Run with Karma',
-        vscode.TestRunProfileKind.Run,
-        createRunHandler(BrowserTestRunner, vscode.TestRunProfileKind.Run),
-        true,
-        undefined,
-        true
-      );
-
-      ctrl.createRunProfile(
-        'Debug with Karma',
-        vscode.TestRunProfileKind.Debug,
-        createRunHandler(BrowserTestRunner, vscode.TestRunProfileKind.Debug),
-        true,
-        undefined,
-        true
-      );
-
-      coverage = ctrl.createRunProfile(
-        "Coverage with Karma",
-        vscode.TestRunProfileKind.Coverage,
-        createRunHandler(BrowserTestRunner, vscode.TestRunProfileKind.Coverage),
-        true,
-        undefined,
-        true
-      )
-      break;
-    case "Jest":
-      ctrl.createRunProfile(
-        "Run with Jest",
-        vscode.TestRunProfileKind.Run,
-        createRunHandler(PlatformTestRunner, vscode.TestRunProfileKind.Run),
-        true,
-        undefined,
-        true
-      );
-      ctrl.createRunProfile(
-        'Debug with Jest',
-        vscode.TestRunProfileKind.Debug,
-        createRunHandler(PlatformTestRunner, vscode.TestRunProfileKind.Debug),
-        true,
-        undefined,
-        true
-      );
-
-      coverage = ctrl.createRunProfile(
-        "Coverage with Jest",
-        vscode.TestRunProfileKind.Coverage,
-        createRunHandler(PlatformTestRunner, vscode.TestRunProfileKind.Coverage),
-        true,
-        undefined,
-        true
-      )
+  function updateNodeForDocument(e: vscode.TextDocument) {
+    const node = getOrCreateFile(ctrl, e.uri);
+    const data = node && itemData.get(node);
+    if (data instanceof TestFile) {
+      data.updateFromContents(ctrl, e.getText(), node!);
+    }
   }
 
+  if (runnerName === undefined) {
+    const k = await vscode.workspace.findFiles('*.confi?g?.m?(j|t)sx?');
+    const d =(await vscode.workspace.findFiles('*.json')).concat(k)
+    for (let i = 0; i < d.length; i++) {
+      const u = d[i];
+      const document = await vscode.workspace.openTextDocument(u)
+      if (runnerName === undefined) {
+        const runner = await getRunnerName(document);
+        if (!!runner && runner.length) {
+          runnerName = runner;
+        }
+      }
+    }
+  }
+
+  // eslint-disable-next-line prefer-const
+  let coverage: vscode.TestRunProfile = undefined!;
+  switch (runnerName) {
+    case "Angular":
+      ctrl.createRunProfile(
+        "Angular Tests",
+        vscode.TestRunProfileKind.Run,
+        createRunHandler(AngularTestRunner, vscode.TestRunProfileKind.Run),
+        true,
+        undefined,
+        true
+      );
+      // TODO: Fix debugger profile
+/*
+      ctrl.createRunProfile(
+        "Angular Debug Tests",
+        vscode.TestRunProfileKind.Debug,
+        createRunHandler(AngularTestRunner, vscode.TestRunProfileKind.Debug),
+        true,
+        undefined,
+        true
+      );
+*/
+      // TODO: Fix Coverage profile
+      coverage = ctrl.createRunProfile(
+        "Coverage with Angular",
+        vscode.TestRunProfileKind.Coverage,
+        createRunHandler(AngularTestRunner, vscode.TestRunProfileKind.Coverage),
+        true,
+        undefined,
+        true
+      )
+    }
   if (coverage)
     coverage.loadDetailedCoverage = coverageContext.loadDetailedCoverage;
-  if (runnerName !== "Jest")
-    for (const [name, arg] of browserArgs) {
-      const cfg = ctrl.createRunProfile(
-        `Run in ${name}`,
-        vscode.TestRunProfileKind.Run,
-        createRunHandler(BrowserTestRunner, vscode.TestRunProfileKind.Run, [' --browser', arg]),
-        undefined,
-        undefined,
-        true
-      );
+  // if (runnerName !== "Jest")
+  //   for (const [name, arg] of browserArgs) {
+  //     const cfg = ctrl.createRunProfile(
+  //       `Run in ${name}`,
+  //       vscode.TestRunProfileKind.Run,
+  //       createRunHandler(BrowserTestRunner, vscode.TestRunProfileKind.Run, [' --browser', arg]),
+  //       undefined,
+  //       undefined,
+  //       true
+  //     );
 
-      cfg.configureHandler = () => vscode.window.showInformationMessage(`Configuring ${name}`);
+  //     cfg.configureHandler = () => vscode.window.showInformationMessage(`Configuring ${name}`);
 
-      ctrl.createRunProfile(
-        `Debug in ${name}`,
-        vscode.TestRunProfileKind.Debug,
-        createRunHandler(BrowserTestRunner, vscode.TestRunProfileKind.Debug, [
-          '--browser',
-          arg,
-          '--debug-browser',
-        ]),
-        undefined,
-        undefined,
-        true
-      );
-    }
+  //     ctrl.createRunProfile(
+  //       `Debug in ${name}`,
+  //       vscode.TestRunProfileKind.Debug,
+  //       createRunHandler(BrowserTestRunner, vscode.TestRunProfileKind.Debug, [
+  //         '--browser',
+  //         arg,
+  //         '--debug-browser',
+  //       ]),
+  //       undefined,
+  //       undefined,
+  //       true
+  //     );
+  //   }
 
   context.subscriptions.push(
     ctrl,

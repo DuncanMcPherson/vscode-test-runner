@@ -2,7 +2,6 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import { join, relative } from 'path';
 import * as ts from 'typescript';
 import { TextDecoder } from 'util';
 import * as vscode from 'vscode';
@@ -64,7 +63,7 @@ export class TestFile {
   }
 
   public getLabel() {
-    return relative(join(this.workspaceFolder.uri.fsPath, 'src'), this.uri.fsPath);
+    return this.uri.fsPath.split("\\").pop()!;
   }
 
   public async updateFromDisk(controller: vscode.TestController, item: vscode.TestItem) {
@@ -96,11 +95,11 @@ export class TestFile {
       );
 
       const parents: { item: vscode.TestItem; children: vscode.TestItem[] }[] = [
-        { item: file, children: [] },
+        { item: file, children: [] }
       ];
       const traverse = (node: ts.Node) => {
         const parent = parents[parents.length - 1];
-        const childData = extractTestFromNode(ast, node, itemData.get(parent.item)!);
+        const childData = extractTestFromNode(ast, node, itemData.get(parent?.item)!);
         if (childData === Action.Skip) {
           return;
         }
@@ -110,11 +109,11 @@ export class TestFile {
           return;
         }
 
-        const id = `${file.uri}/${childData.fullName}`.toLowerCase();
+        const id = `${childData.fullName}`.toLowerCase();
 
         // Skip duplicated tests. They won't run correctly with the way
         // mocha reports them, and will error if we try to insert them.
-        const existing = parent.children.find(c => c.id === id);
+        const existing = parent?.children.find(c => c.id === id);
         if (existing) {
           const diagnostic = new vscode.Diagnostic(
             childData.range,
@@ -136,7 +135,9 @@ export class TestFile {
         const item = controller.createTestItem(id, childData.name, file.uri);
         itemData.set(item, childData);
         item.range = childData.range;
-        parent.children.push(item);
+        if (parent) {
+          parent.children.push(item);
+        }
 
         if (childData instanceof TestSuite) {
           parents.push({ item: item, children: [] });

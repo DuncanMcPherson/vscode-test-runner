@@ -6,7 +6,8 @@ import * as ts from 'typescript';
 import * as vscode from 'vscode';
 import { TestCase, TestConstruct, TestSuite, VSCodeTest } from './testTree';
 
-const suiteNames = new Set(['suite', 'flakySuite']);
+const suiteNames = new Set(['suite', 'flakySuite', "describe"]);
+const testNames = new Set(["it", "test"]);
 
 export const enum Action {
   Skip,
@@ -45,7 +46,7 @@ export const extractTestFromNode = (src: ts.SourceFile, node: ts.Node, parent: V
   );
 
   const cparent = parent instanceof TestConstruct ? parent : undefined;
-  if (lhs.escapedText === 'test') {
+  if (testNames.has(lhs.escapedText.toString())) {
     return new TestCase(name.text, range, cparent);
   }
 

@@ -14,16 +14,15 @@ import { decode as base64Decode } from 'js-base64';
 import * as split from 'split2';
 import * as vscode from 'vscode';
 import { coverageContext } from './coverageProvider';
-import { attachTestMessageMetadata } from './metadata';
-import { snapshotComment } from './snapshot';
 import { getContentFromFilesystem } from './testTree';
 
-export const enum MochaEvent {
-  Start = 'start',
-  TestStart = 'testStart',
-  Pass = 'pass',
-  Fail = 'fail',
-  End = 'end',
+export const enum JasmineEvent {
+  Start = 'jasmineStarted',
+  SuiteStarted = "suiteStarted",
+  SuiteFinished = "suiteDone",
+  TestStart = 'specStarted',
+  TestFinished = "specDone",
+  End = 'jasmineDone',
 }
 
 export interface IStartEvent {
@@ -33,22 +32,29 @@ export interface IStartEvent {
 export interface ITestStartEvent {
   title: string;
   fullTitle: string;
-  file: string;
   currentRetry: number;
   speed: string;
 }
 
-export interface IPassEvent extends ITestStartEvent {
+export interface ISuiteStartEvent {
+  title: string;
+  fullTitle: string;
+}
+
+export interface ISuiteFinishEvent extends ISuiteStartEvent {
   duration: number;
 }
 
-export interface IFailEvent extends IPassEvent {
-  err: string;
-  stack: string | null;
+export interface ITestCompleteEvent extends ITestStartEvent {
+  duration: number;
+  passed: boolean;
+  reason?: string;
   expected?: string;
   actual?: string;
-  expectedJSON?: unknown;
-  actualJSON?: unknown;
+  err?: string;
+  stack?: string;
+  expectedJSON?: any;
+  actualJSON?: any;
   snapshotPath?: string;
 }
 
@@ -62,22 +68,23 @@ export interface IEndEvent {
   end: string /* ISO date */;
 }
 
-export type MochaEventTuple =
-  | [MochaEvent.Start, IStartEvent]
-  | [MochaEvent.TestStart, ITestStartEvent]
-  | [MochaEvent.Pass, IPassEvent]
-  | [MochaEvent.Fail, IFailEvent]
-  | [MochaEvent.End, IEndEvent];
+export type JasmineEventTuple =
+  | [JasmineEvent.Start, IStartEvent]
+  | [JasmineEvent.TestStart, ITestStartEvent]
+  | [JasmineEvent.SuiteStarted, ISuiteStartEvent]
+  | [JasmineEvent.TestFinished, ITestCompleteEvent]
+  | [JasmineEvent.SuiteFinished, ISuiteFinishEvent]
+  | [JasmineEvent.End, IEndEvent];
 
 export class TestOutputScanner implements vscode.Disposable {
-  protected mochaEventEmitter = new vscode.EventEmitter<MochaEventTuple>();
+  protected jasmineEventEmitter = new vscode.EventEmitter<JasmineEventTuple>();
   protected outputEventEmitter = new vscode.EventEmitter<string>();
   protected onExitEmitter = new vscode.EventEmitter<string | undefined>();
 
   /**
    * Fired when a mocha event comes in.
    */
-  public readonly onMochaEvent = this.mochaEventEmitter.event;
+  public readonly onJasmineEvent = this.jasmineEventEmitter.event;
 
   /**
    * Fired when other output from the process comes in.
@@ -90,8 +97,10 @@ export class TestOutputScanner implements vscode.Disposable {
   public readonly onRunnerExit = this.onExitEmitter.event;
 
   constructor(private readonly process: ChildProcessWithoutNullStreams, private args?: string[]) {
-    process.stdout.pipe(split()).on('data', this.processData);
-    process.stderr.pipe(split()).on('data', this.processData);
+    process.stdout!.pipe(split()).on('data', this.processData);
+    process.stdout.pipe(split()).on("message", this.processData);
+    process.stderr.pipe(split()).on("message", this.processData);
+    process.stderr!.pipe(split()).on('data', this.processData);
     process.on('error', e => this.onExitEmitter.fire(e.message));
     process.on('exit', code =>
       this.onExitEmitter.fire(code ? `Test process exited with code ${code}` : undefined)
@@ -110,6 +119,12 @@ export class TestOutputScanner implements vscode.Disposable {
   }
 
   protected readonly processData = (data: string) => {
+    if (data.includes(": '[")) {
+      const dataParts = data.split(': ');
+      data = dataParts.pop()!;
+      data = data.replace("'", '');
+      data = data.replace("'", '');
+    }
     if (this.args) {
       this.outputEventEmitter.fire(`./scripts/test ${this.args.join(' ')}`);
       this.args = undefined;
@@ -118,7 +133,7 @@ export class TestOutputScanner implements vscode.Disposable {
     try {
       const parsed = JSON.parse(data) as unknown;
       if (parsed instanceof Array && parsed.length === 2 && typeof parsed[0] === 'string') {
-        this.mochaEventEmitter.fire(parsed as MochaEventTuple);
+        this.jasmineEventEmitter.fire(parsed as JasmineEventTuple);
       } else {
         this.outputEventEmitter.fire(data);
       }
@@ -198,11 +213,11 @@ export async function scanTestOutput(
         );
       });
 
-      scanner.onMochaEvent(evt => {
+      scanner.onJasmineEvent(evt => {
         switch (evt[0]) {
-          case MochaEvent.Start:
+          case JasmineEvent.Start:
             break; // no-op
-          case MochaEvent.TestStart:
+          case JasmineEvent.TestStart:
             currentTest = tests.get(evt[1].fullTitle);
             if (!currentTest) {
               console.warn(`Could not find test ${evt[1].fullTitle}`);
@@ -212,95 +227,85 @@ export async function scanTestOutput(
             task.started(currentTest);
             ranAnyTest = true;
             break;
-          case MochaEvent.Pass:
+          case JasmineEvent.TestFinished:
             {
               const title = evt[1].fullTitle;
               const tcase = tests.get(title);
+              const result = evt[1].passed;
               enqueueOutput(` ${styles.green.open}√${styles.green.close} ${title}\r\n`);
               if (tcase) {
+                if (result) {
                 lastTest = tcase;
                 task.passed(tcase, evt[1].duration);
                 tests.delete(title);
-              }
-            }
-            break;
-          case MochaEvent.Fail:
-            {
-              const {
-                err,
-                stack,
-                duration,
-                expected,
-                expectedJSON,
-                actual,
-                actualJSON,
-                snapshotPath,
-                fullTitle: id,
-              } = evt[1];
-              let tcase = tests.get(id);
-              // report failures on hook to the last-seen test, or first test if none run yet
-              if (!tcase && (id.includes('hook for') || id.includes('hook in'))) {
-                tcase = lastTest ?? tests.values().next().value;
-              }
-
-              enqueueOutput(`${styles.red.open} x ${id}${styles.red.close}\r\n`);
-              const rawErr = stack || err;
-              const locationsReplaced = replaceAllLocations(store, forceCRLF(rawErr));
-              if (rawErr) {
-                enqueueOutput(async () => [await locationsReplaced, undefined, tcase]);
-              }
-
-              if (!tcase) {
-                return;
-              }
-
-              tests.delete(id);
-
-              const hasDiff =
-                actual !== undefined &&
-                expected !== undefined &&
-                (expected !== '[undefined]' || actual !== '[undefined]');
-              const testFirstLine =
-                tcase.range &&
-                new vscode.Location(
-                  tcase.uri!,
-                  new vscode.Range(
-                    tcase.range.start,
-                    new vscode.Position(tcase.range.start.line, 100)
-                  )
-                );
-
-              enqueueExitBlocker(
-                (async () => {
-                  const location = await tryDeriveStackLocation(store, rawErr, tcase!);
-                  let message: vscode.TestMessage;
-
-                  if (hasDiff) {
-                    message = new vscode.TestMessage(tryMakeMarkdown(err));
-                    message.actualOutput = outputToString(actual);
-                    message.expectedOutput = outputToString(expected);
-                    if (snapshotPath) {
-                      message.contextValue = 'isSelfhostSnapshotMessage';
-                      message.expectedOutput += snapshotComment + snapshotPath;
-                    }
-
-                    attachTestMessageMetadata(message, {
-                      expectedValue: expectedJSON,
-                      actualValue: actualJSON,
-                    });
-                  } else {
-                    message = new vscode.TestMessage(
-                      stack ? await sourcemapStack(store, stack) : await locationsReplaced
-                    );
+              } else {
+                {
+                  const {
+                    err,
+                    stack,
+                    duration,
+                    expected,
+                    actual,
+                    fullTitle: id,
+                  } = evt[1];
+                  let tcase = tests.get(id);
+                  // report failures on hook to the last-seen test, or first test if none run yet
+                  if (!tcase && (id.includes('hook for') || id.includes('hook in'))) {
+                    tcase = lastTest ?? tests.values().next().value;
                   }
-
-                  message.location = location ?? testFirstLine;
-                  task.failed(tcase!, message, duration);
-                })()
-              );
+    
+                  enqueueOutput(`${styles.red.open} x ${id}${styles.red.close}\r\n`);
+                  const rawErr = stack || err;
+                  const locationsReplaced = replaceAllLocations(store, forceCRLF(rawErr!));
+                  if (rawErr) {
+                    enqueueOutput(async () => [await locationsReplaced, undefined, tcase]);
+                  }
+    
+                  if (!tcase) {
+                    return;
+                  }
+    
+                  tests.delete(id);
+    
+                  const hasDiff =
+                    actual !== undefined &&
+                    expected !== undefined &&
+                    (expected !== '[undefined]' || actual !== '[undefined]');
+                  const testFirstLine =
+                    tcase.range &&
+                    new vscode.Location(
+                      tcase.uri!,
+                      new vscode.Range(
+                        tcase.range.start,
+                        new vscode.Position(tcase.range.start.line, 100)
+                      )
+                    );
+    
+                  enqueueExitBlocker(
+                    (async () => {
+                      const location = await tryDeriveStackLocation(store, rawErr!, tcase!);
+                      let message: vscode.TestMessage;
+    
+                      if (hasDiff) {
+                        message = new vscode.TestMessage(tryMakeMarkdown(err!));
+                        message.actualOutput = outputToString(actual);
+                        message.expectedOutput = outputToString(expected);
+                      } else {
+                        message = new vscode.TestMessage(
+                          stack ? await sourcemapStack(store, stack) : await locationsReplaced
+                        );
+                      }
+    
+                      message.location = location ?? testFirstLine;
+                      task.failed(tcase!, message, duration);
+                    })()
+                  );
+                }
+              }
             }
+          }
             break;
-          case MochaEvent.End:
+          case JasmineEvent.End:
             // no-op, we wait until the process exits to ensure coverage is written out
             break;
         }
