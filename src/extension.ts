@@ -270,6 +270,7 @@ export async function activate(context: vscode.ExtensionContext) {
         true
       );
 */
+/*
       // TODO: Fix Coverage profile
       coverage = ctrl.createRunProfile(
         "Coverage with Angular",
@@ -279,6 +280,7 @@ export async function activate(context: vscode.ExtensionContext) {
         undefined,
         true
       )
+      */
     }
   if (coverage)
     coverage.loadDetailedCoverage = coverageContext.loadDetailedCoverage;
